@@ -49,6 +49,11 @@ automatic_scaling:
   max_instances: 1
 EOF
 
+if ! gcloud app describe >/dev/null 2>&1; then
+  log "App Engine application ko us-east4 region me initialize kar raha hoon"
+  gcloud app create --region="${REGION}" --quiet
+fi
+
 log "First deployment: default Hello World"
 gcloud app deploy app.yaml --quiet
 
