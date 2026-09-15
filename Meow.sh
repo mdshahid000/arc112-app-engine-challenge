@@ -3,7 +3,8 @@ set -Eeuo pipefail
 
 REGION="us-east4"
 INSTANCE="lab-setup"
-REMOTE_SCRIPT="/tmp/arc112-run.sh"
+REMOTE_HOME="/tmp/arc112-home"
+LOCAL_APP="/tmp/arc112-app"
 
 log() { printf '\n\033[1;36m[%s]\033[0m %s\n' "$(date +%H:%M:%S)" "$*"; }
 
@@ -11,105 +12,76 @@ PROJECT_ID="$(gcloud config get-value project 2>/dev/null || true)"
 if [[ -z "${PROJECT_ID}" || "${PROJECT_ID}" == "(unset)" ]]; then
   PROJECT_ID="$(gcloud projects list --format='value(projectId)' --filter='projectId~^qwiklabs-gcp-' --limit=1)"
 fi
-if [[ -z "${PROJECT_ID}" ]]; then
-  echo "ERROR: Lab project nahi mila. Cloud Shell me lab student account se login karein." >&2
-  exit 1
-fi
-
+[[ -n "${PROJECT_ID}" ]] || { echo "ERROR: Lab project nahi mila." >&2; exit 1; }
 gcloud config set project "${PROJECT_ID}" >/dev/null
-
 ZONE="$(gcloud compute instances list --filter="name=('${INSTANCE}')" --format='value(zone.basename())' | head -n1)"
-if [[ -z "${ZONE}" ]]; then
-  echo "ERROR: '${INSTANCE}' VM nahi mili. Lab start karke Cloud Shell se dobara run karein." >&2
-  exit 1
-fi
+[[ -n "${ZONE}" ]] || { echo "ERROR: lab-setup VM nahi mili." >&2; exit 1; }
 
 log "Project: ${PROJECT_ID} | VM: ${INSTANCE} | Zone: ${ZONE} | App Engine region: ${REGION}"
 
-cat > /tmp/arc112-remote.sh <<'REMOTE'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-REGION="us-east4"
-WORKDIR="${HOME}/python-docs-samples"
-APPDIR="${WORKDIR}/appengine/standard_python3/hello_world"
-log() { printf '\n[VM %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
-
-log "Python Hello World repository clone/check"
-if [[ ! -d "${APPDIR}" ]]; then
-  git clone --depth=1 --filter=blob:none --sparse \
-    https://github.com/GoogleCloudPlatform/python-docs-samples.git "${WORKDIR}"
-  git -C "${WORKDIR}" sparse-checkout set appengine/standard_python3/hello_world
+REMOTE_PREP='set -Eeuo pipefail
+WORKDIR="$HOME/python-docs-samples"
+APPDIR="$WORKDIR/appengine/standard_python3/hello_world"
+if [[ ! -d "$APPDIR" ]]; then
+  git clone --depth=1 --filter=blob:none --sparse https://github.com/GoogleCloudPlatform/python-docs-samples.git "$WORKDIR"
+  git -C "$WORKDIR" sparse-checkout set appengine/standard_python3/hello_world
 fi
-cd "${APPDIR}"
-
-# Keep the lab project within its instance quota requirement.
-sed -i '/^automatic_scaling:/,$d' app.yaml || true
-cat >> app.yaml <<'EOF'
+cd "$APPDIR"
+sed -i "/^automatic_scaling:/,$d" app.yaml || true
+cat >> app.yaml <<"EOF"
 automatic_scaling:
   max_instances: 1
 EOF
+printf "VM_APP_READY=%s\\n" "$APPDIR"'
+
+log "IAP ke through VM par Hello World app download/configure kar raha hoon"
+gcloud compute ssh "${INSTANCE}" --zone="${ZONE}" --tunnel-through-iap --quiet --command="${REMOTE_PREP}"
+
+rm -rf "${LOCAL_APP}"
+mkdir -p "${LOCAL_APP}"
+log "VM se app Cloud Shell me copy kar raha hoon"
+gcloud compute scp --recurse --tunnel-through-iap --quiet \
+  "${INSTANCE}:python-docs-samples/appengine/standard_python3/hello_world/." \
+  "${LOCAL_APP}/" --zone="${ZONE}"
+cd "${LOCAL_APP}"
 
 if ! gcloud app describe >/dev/null 2>&1; then
-  log "App Engine application ko us-east4 region me initialize kar raha hoon"
+  log "Cloud Shell student account se App Engine us-east4 initialize kar raha hoon"
   gcloud app create --region="${REGION}" --quiet
 fi
 
-log "First deployment: default Hello World"
+log "Cloud Shell student account se first deployment kar raha hoon"
 gcloud app deploy app.yaml --quiet
-
 URL="$(gcloud app browse --no-launch-browser 2>/dev/null | awk '/https?:\/\// {print $NF; exit}')"
-if [[ -z "${URL}" ]]; then URL="https://${GOOGLE_CLOUD_PROJECT}.appspot.com"; fi
+[[ -n "${URL}" ]] || URL="https://${PROJECT_ID}.appspot.com"
 STATUS1="$(curl -L -s -o /tmp/arc112-before.txt -w '%{http_code}' "${URL}" || true)"
 printf '\nFirst deployment URL: %s\nHTTP status: %s\n' "${URL}" "${STATUS1}"
 
-log "Greeting ko Hello, Cruel World! me update kar raha hoon"
-python3 - <<'PY'
+log "VM par greeting update kar raha hoon"
+REMOTE_UPDATE='set -Eeuo pipefail
+cd "$HOME/python-docs-samples/appengine/standard_python3/hello_world"
+python3 - <<"PY"
 from pathlib import Path
-p = Path('main.py')
-if not p.exists():
-    raise SystemExit('ERROR: Expected Python main.py nahi mila')
-s = p.read_text()
-replacements = [
-    ('Hello, World!', 'Hello, Cruel World!'),
-    ('Hello World!', 'Hello, Cruel World!'),
-    ('Hello world!', 'Hello, Cruel World!'),
-    ('Hello World', 'Hello, Cruel World!'),
-]
-for old, new in replacements:
-    s = s.replace(old, new)
+p=Path("main.py")
+s=p.read_text()
+for old in ("Hello, World!", "Hello World!", "Hello world!", "Hello World"):
+    s=s.replace(old, "Hello, Cruel World!")
 p.write_text(s)
-if 'Cruel World' not in s:
-    raise SystemExit('ERROR: Greeting update apply nahi hua')
-PY
+assert "Cruel World" in s
+PY'
+gcloud compute ssh "${INSTANCE}" --zone="${ZONE}" --tunnel-through-iap --quiet --command="${REMOTE_UPDATE}"
 
-log "Second deployment: updated greeting"
+rm -rf "${LOCAL_APP}"
+mkdir -p "${LOCAL_APP}"
+log "Updated app VM se Cloud Shell me copy kar raha hoon"
+gcloud compute scp --recurse --tunnel-through-iap --quiet \
+  "${INSTANCE}:python-docs-samples/appengine/standard_python3/hello_world/." \
+  "${LOCAL_APP}/" --zone="${ZONE}"
+cd "${LOCAL_APP}"
+
+log "Cloud Shell student account se updated deployment kar raha hoon"
 gcloud app deploy app.yaml --quiet
 STATUS2="$(curl -L -s -o /tmp/arc112-after.txt -w '%{http_code}' "${URL}" || true)"
 printf '\nFinal deployment URL: %s\nHTTP status: %s\n' "${URL}" "${STATUS2}"
-printf 'Final response preview:\n'
 sed -n '1,5p' /tmp/arc112-after.txt || true
-REMOTE
-
-chmod +x /tmp/arc112-remote.sh
-ENCODED="$(base64 -w0 /tmp/arc112-remote.sh)"
-log "IAP tunnel ke through ${INSTANCE} VM par remote deployment workflow chala raha hoon"
-SSH_COMMAND="echo ${ENCODED} | base64 -d > ${REMOTE_SCRIPT} && chmod +x ${REMOTE_SCRIPT} && ${REMOTE_SCRIPT}"
-SSH_OK=0
-for ATTEMPT in 1 2 3 4; do
-  if gcloud compute ssh "${INSTANCE}" --zone="${ZONE}" \
-      --tunnel-through-iap --quiet --command="${SSH_COMMAND}"; then
-    SSH_OK=1
-    break
-  fi
-  log "SSH attempt ${ATTEMPT} fail hua; 15 seconds baad retry kar raha hoon"
-  sleep 15
-done
-if [[ "${SSH_OK}" != "1" ]]; then
-  echo "ERROR: lab-setup VM par SSH establish nahi hua. Console me VM row ka SSH button ek baar open karke script dobara run karein." >&2
-  exit 1
-fi
-
-cat <<'NOTE'
-
-ARC112 ke download, first deployment aur updated deployment tasks complete ho gaye. Skills Boost page par 30-60 seconds wait karke dono objectives par "Check my progress" click karein.
-NOTE
+printf '\nARC112 deployments complete. 30-60 seconds wait karke Check my progress click karein.\n'
