@@ -87,9 +87,22 @@ REMOTE
 
 chmod +x /tmp/arc112-remote.sh
 ENCODED="$(base64 -w0 /tmp/arc112-remote.sh)"
-log "SSH ke ${INSTANCE} VM par remote deployment workflow chala raha hoon"
-gcloud compute ssh "${INSTANCE}" --zone="${ZONE}" --quiet \
-  --command="echo ${ENCODED} | base64 -d > ${REMOTE_SCRIPT} && chmod +x ${REMOTE_SCRIPT} && ${REMOTE_SCRIPT}"
+log "IAP tunnel ke through ${INSTANCE} VM par remote deployment workflow chala raha hoon"
+SSH_COMMAND="echo ${ENCODED} | base64 -d > ${REMOTE_SCRIPT} && chmod +x ${REMOTE_SCRIPT} && ${REMOTE_SCRIPT}"
+SSH_OK=0
+for ATTEMPT in 1 2 3 4; do
+  if gcloud compute ssh "${INSTANCE}" --zone="${ZONE}" \
+      --tunnel-through-iap --quiet --command="${SSH_COMMAND}"; then
+    SSH_OK=1
+    break
+  fi
+  log "SSH attempt ${ATTEMPT} fail hua; 15 seconds baad retry kar raha hoon"
+  sleep 15
+done
+if [[ "${SSH_OK}" != "1" ]]; then
+  echo "ERROR: lab-setup VM par SSH establish nahi hua. Console me VM row ka SSH button ek baar open karke script dobara run karein." >&2
+  exit 1
+fi
 
 cat <<'NOTE'
 
