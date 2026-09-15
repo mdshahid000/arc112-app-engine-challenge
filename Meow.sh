@@ -19,6 +19,14 @@ ZONE="$(gcloud compute instances list --filter="name=('${INSTANCE}')" --format='
 
 log "Project: ${PROJECT_ID} | VM: ${INSTANCE} | Zone: ${ZONE} | App Engine region: ${REGION}"
 
+run_remote() {
+  local script="$1"
+  local encoded
+  encoded="$(printf '%s' "$script" | base64 -w0)"
+  gcloud compute ssh "${INSTANCE}" --zone="${ZONE}" --tunnel-through-iap --quiet \
+    --command="echo ${encoded} | base64 -d | bash"
+}
+
 REMOTE_PREP='set -Eeuo pipefail
 WORKDIR="$HOME/python-docs-samples"
 APPDIR="$WORKDIR/appengine/standard_python3/hello_world"
@@ -35,7 +43,7 @@ EOF
 printf "VM_APP_READY=%s\\n" "$APPDIR"'
 
 log "IAP ke through VM par Hello World app download/configure kar raha hoon"
-gcloud compute ssh "${INSTANCE}" --zone="${ZONE}" --tunnel-through-iap --quiet --command="${REMOTE_PREP}"
+run_remote "${REMOTE_PREP}"
 
 rm -rf "${LOCAL_APP}"
 mkdir -p "${LOCAL_APP}"
@@ -69,7 +77,7 @@ for old in ("Hello, World!", "Hello World!", "Hello world!", "Hello World"):
 p.write_text(s)
 assert "Cruel World" in s
 PY'
-gcloud compute ssh "${INSTANCE}" --zone="${ZONE}" --tunnel-through-iap --quiet --command="${REMOTE_UPDATE}"
+run_remote "${REMOTE_UPDATE}"
 
 rm -rf "${LOCAL_APP}"
 mkdir -p "${LOCAL_APP}"
